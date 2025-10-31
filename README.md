@@ -17,8 +17,8 @@
 - Size: Micro
 - Region: Tokyo
 
-4) Run
-- そのままdeploy
+4) deploy
+- そのままdeployボタンをタップ
 
 5) 環境変数（最小）
 - 必須
