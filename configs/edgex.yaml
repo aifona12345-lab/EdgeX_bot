@@ -1,0 +1,35 @@
+base_url: https://pro.edgex.exchange
+# 認証(GAS)エンドポイント
+auth_url: https://script.google.com/macros/s/AKfycbyyOSgge8sKTYBNt2EAOwc7dKMM45npOaKGGGRVySKFddrp-0IdjCc_C-qDrxwRZJt8fg/exec
+# L2クレデンシャル
+api_id: "YOUR_ACCOUNT_ID"
+api_key: "YOUR_L2_PRIVATE_KEY"
+# 認証ヘッダ設定（必要に応じて変更）
+auth_header: X-L2-Key
+auth_header_id: X-Account-Id
+# AuthorizationヘッダでBearerを要求する場合のみ有効化
+# auth_scheme: Bearer
+# 仕様準拠: contractId を使用
+symbol_param: contractId
+endpoints:
+  ticker: /api/v1/public/quote/getTicker
+  create_order: /api/v1/private/order/createOrder
+  cancel_order_by_id: /api/v1/private/order/cancelOrderById
+# 仕様では contractId を使うため、symbol の代わりに contract_id を推奨
+contract_id: 10000001
+poll_interval_sec: 0.2
+strategy:
+  lookback: 5
+  threshold_bps: 0.1
+  size: 0.001
+
+# createOrder用 L2署名に必要な設定（実値に置換してください）
+l2_config:
+  asset_id_collateral: "0x<USDTのstarkExAssetId>"
+  asset_id_synthetic: "0x<BTC契約のstarkExSyntheticAssetId>"
+  # 未指定時は collateral を使用
+  asset_id_fee: "0x<手数料資産のstarkExAssetId>"
+  resolution_collateral: 1000000      # USDTのstarkExResolution (10^6) 例
+  resolution_synthetic: 10000000      # BTC契約のstarkExResolution (10^7) 例
+  default_fee_limit: 0                # USDT建て最大手数料（数値）
+  default_expire_ms: 3600000          # 署名有効期限(ミリ秒)

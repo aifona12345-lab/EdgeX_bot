@@ -1,0 +1,14 @@
+httpx[http2]
+websockets
+pydantic>=2
+tenacity
+loguru
+rich
+sqlalchemy
+aiosqlite
+PyYAML
+python-dotenv
+ecdsa
+starknet_py
+edgex-python-sdk
+requests
