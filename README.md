@@ -34,12 +34,12 @@
 - GAS が `{ "allowed": true }` を返せば起動、`false` なら停止します。
 - 既定の `auth_url` はリポジトリに含まれています。自分のGAS URLに差し替える場合は `configs/edgex.yaml` を編集してください。
 
-### 認可フロー（管理人経由）
-1. あなたの `EDGEX_ACCOUNT_ID`（数値）を管理人へ連絡
-2. 管理人がスプレッドシートの許可リスト（A列）に追加
-3. 管理人から共有された認証URLでテスト（例）
+### 認可フロー（管理人に依頼）
+1. 管理人に「EdgeXのAPI開放」と「Bot利用許可」を依頼
+2. あなたの `EDGEX_ACCOUNT_ID`（= コード番号）を管理人へ送る
+3. 管理人の許可後、認証URLで確認（例）
    - `https://<script-id>/exec?accountId=YOUR_ACCOUNT_ID`
-   - 返り値が `{ "allowed": true }` になればOK
+   - `{ "allowed": true }` になればOK
 4. Koyeb の環境変数に同じ `EDGEX_ACCOUNT_ID` を設定して起動
 
 ## 動作概要
