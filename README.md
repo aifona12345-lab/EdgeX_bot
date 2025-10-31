@@ -5,7 +5,7 @@
 ## デプロイ（Koyeb）
 
 1) Webサービス作成
-- Koyebにログイン → 「Create Web Service」
+- Koyebにログイン → 「Create Web Service（Worker）」
 - ソースに「GitHub」を選択 → 「Public GitHub Repository」にこのリポジトリURLを貼り付け
 
 2) Build
