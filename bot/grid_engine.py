@@ -303,19 +303,29 @@ class GridEngine:
             prev_units = self._bin_center_units if self._bin_center_units is not None else center_units
             delta_units = center_units - prev_units
 
-            # 変化なし → レベル不足のみ外側へ補充
+            # 変化なし → レベル不足なら現在センター基準で再シード/補充（近い側は既存を優先し、欠けている価格のみ追加）
             if delta_units == 0:
                 try:
-                    while len(self.placed_buy_px_to_id) < self.levels and self.placed_buy_px_to_id:
-                        new_outer_buy = min(self.placed_buy_px_to_id.keys()) - self.step
-                        if new_outer_buy <= 0:
-                            break
-                        await self._place_order(OrderSide.BUY, new_outer_buy)
-                        await asyncio.sleep(self.op_spacing_sec)
-                    while len(self.placed_sell_px_to_id) < self.levels and self.placed_sell_px_to_id:
-                        new_outer_sell = max(self.placed_sell_px_to_id.keys()) + self.step
-                        await self._place_order(OrderSide.SELL, new_outer_sell)
-                        await asyncio.sleep(self.op_spacing_sec)
+                    buy_targets = [center - k * self.step for k in range(self.levels, 0, -1)]
+                    sell_targets = [center + k * self.step for k in range(1, self.levels + 1)]
+
+                    # BUY不足: ターゲット列から欠けている価格を追加（キャンセルはしない）
+                    if len(self.placed_buy_px_to_id) < self.levels:
+                        for px in buy_targets:
+                            if len(self.placed_buy_px_to_id) >= self.levels:
+                                break
+                            if px not in self.placed_buy_px_to_id:
+                                await self._place_order(OrderSide.BUY, px)
+                                await asyncio.sleep(self.op_spacing_sec)
+
+                    # SELL不足: ターゲット列から欠けている価格を追加（キャンセルはしない）
+                    if len(self.placed_sell_px_to_id) < self.levels:
+                        for px in sell_targets:
+                            if len(self.placed_sell_px_to_id) >= self.levels:
+                                break
+                            if px not in self.placed_sell_px_to_id:
+                                await self._place_order(OrderSide.SELL, px)
+                                await asyncio.sleep(self.op_spacing_sec)
                 except Exception as e:
                     logger.debug("BIN: 補充スキップ {}", e)
                 return
@@ -341,18 +351,13 @@ class GridEngine:
                             await self._place_order(OrderSide.BUY, new_near_buy)
                             await asyncio.sleep(self.op_spacing_sec)
 
-                    # SELLは近い側を触らず最外だけを+Nで差し直し
+                    # SELLはキャンセルせず、最外のさらに外側に1本だけ追加
                     if self.placed_sell_px_to_id:
                         far_sell_px = max(self.placed_sell_px_to_id.keys())
-                        far_sell_id = self.placed_sell_px_to_id.pop(far_sell_px)
-                        try:
-                            await self.adapter.cancel_order(far_sell_id)
-                        except Exception:
-                            logger.debug("BIN↑: 遠いSELLキャンセル失敗(無視) id={} px={}", far_sell_id, far_sell_px)
-                        await asyncio.sleep(self.op_spacing_sec)
-
                         new_outer_sell = far_sell_px + self.step
-                        if new_outer_sell > (mid_price + 1e-9) and new_outer_sell not in self.placed_sell_px_to_id and self._has_min_gap(self.placed_sell_px_to_id, new_outer_sell):
+                        if new_outer_sell > (mid_price + 1e-9) \
+                            and new_outer_sell not in self.placed_sell_px_to_id \
+                            and self._has_min_gap(self.placed_sell_px_to_id, new_outer_sell):
                             await self._place_order(OrderSide.SELL, new_outer_sell)
                             await asyncio.sleep(self.op_spacing_sec)
                 else:
@@ -372,18 +377,14 @@ class GridEngine:
                             await self._place_order(OrderSide.SELL, new_near_sell)
                             await asyncio.sleep(self.op_spacing_sec)
 
-                    # BUYは近い側を触らず最外だけを-Nで差し直し
+                    # BUYはキャンセルせず、最外のさらに外側に1本だけ追加
                     if self.placed_buy_px_to_id:
                         far_buy_px = min(self.placed_buy_px_to_id.keys())
-                        far_buy_id = self.placed_buy_px_to_id.pop(far_buy_px)
-                        try:
-                            await self.adapter.cancel_order(far_buy_id)
-                        except Exception:
-                            logger.debug("BIN↓: 遠いBUYキャンセル失敗(無視) id={} px={}", far_buy_id, far_buy_px)
-                        await asyncio.sleep(self.op_spacing_sec)
-
                         new_outer_buy = far_buy_px - self.step
-                        if new_outer_buy > 0 and new_outer_buy < (mid_price - 1e-9) and new_outer_buy not in self.placed_buy_px_to_id and self._has_min_gap(self.placed_buy_px_to_id, new_outer_buy):
+                        if new_outer_buy > 0 \
+                            and new_outer_buy < (mid_price - 1e-9) \
+                            and new_outer_buy not in self.placed_buy_px_to_id \
+                            and self._has_min_gap(self.placed_buy_px_to_id, new_outer_buy):
                             await self._place_order(OrderSide.BUY, new_outer_buy)
                             await asyncio.sleep(self.op_spacing_sec)
 
