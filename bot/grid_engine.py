@@ -100,6 +100,8 @@ class GridEngine:
             self.bin_mode = str(os.getenv("EDGEX_GRID_BIN_MODE", "1")).lower() in ("1", "true", "yes")
         except Exception:
             self.bin_mode = True
+        # BINモードの現在ビン位置（center_units）を保持し、方向性のインクリメンタル更新に用いる
+        self._bin_center_units: int | None = None
 
         # 価格追従（乖離補正）設定（シンプルモードでは既定OFF）
         try:
@@ -262,7 +264,7 @@ class GridEngine:
         if self.step <= 0:
             return
 
-        # === BIN固定モード: 常に絶対N刻みの価格帯に合わせる（追従/約定イベントに依存しない） ===
+        # === BIN固定モード: 方向性インクリメンタル ===
         if self.bin_mode:
             # 中心を「stepの整数倍」に丸める（例: step=100, P=100,050 → center=100,100）
             try:
@@ -270,62 +272,122 @@ class GridEngine:
                 center = float(center_units * self.step)
             except Exception:
                 center = float(mid_price)
-
-            # 0段（centerそのもの）は置かない。各サイド1..levels段を配置
-            # 例: step=100, levels=5, center=100,000 →
-            #   BUY: 99,500..99,900 / SELL: 100,100..100,500
-            buy_targets = [center - k * self.step for k in range(self.levels, 0, -1)]
-            sell_targets = [center + k * self.step for k in range(1, self.levels + 1)]
-
-            target_buy_set = set(buy_targets)
-            target_sell_set = set(sell_targets)
-
-            # 取消対象: 目標集合から外れている自ボットの注文
-            cancel_ids: list[tuple[str, float]] = []
-            for px, oid in list(self.placed_buy_px_to_id.items()):
-                if px not in target_buy_set:
-                    cancel_ids.append((oid, px))
-            for px, oid in list(self.placed_sell_px_to_id.items()):
-                if px not in target_sell_set:
-                    cancel_ids.append((oid, px))
-            # キャンセル（過度な連発を避けるため最大levels本）
-            for oid, px in cancel_ids[: max(1, self.levels)]:
-                try:
-                    await self.adapter.cancel_order(oid)
-                    if px in self.placed_buy_px_to_id and self.placed_buy_px_to_id.get(px) == oid:
-                        del self.placed_buy_px_to_id[px]
-                    if px in self.placed_sell_px_to_id and self.placed_sell_px_to_id.get(px) == oid:
-                        del self.placed_sell_px_to_id[px]
-                    logger.info("BIN: 目標外をキャンセル id={} px={}", oid, px)
-                except Exception:
-                    logger.debug("BIN: キャンセル失敗(無視) id={} px={}", oid, px)
-                await asyncio.sleep(self.op_spacing_sec)
-
-            # 発注対象: 目標集合−現状
-            need_buys = [px for px in buy_targets if px not in self.placed_buy_px_to_id]
-            need_sells = [px for px in sell_targets if px not in self.placed_sell_px_to_id]
-
-            # 片側あたりの新規上限
-            add_buys = 0
-            add_sells = 0
-
-            for px in need_buys:
-                if self.max_new_per_loop and add_buys >= self.max_new_per_loop:
-                    break
-                await self._place_order(OrderSide.BUY, px)
-                add_buys += 1
-                await asyncio.sleep(self.op_spacing_sec)
-            
-            for px in need_sells:
-                if self.max_new_per_loop and add_sells >= self.max_new_per_loop:
-                    break
-                await self._place_order(OrderSide.SELL, px)
-                add_sells += 1
-                await asyncio.sleep(self.op_spacing_sec)
-            
+                center_units = round(center / self.step)
+            # 初回: 目標列を構築して配置（従来通り）
             if not self.initialized:
+                buy_targets = [center - k * self.step for k in range(self.levels, 0, -1)]
+                sell_targets = [center + k * self.step for k in range(1, self.levels + 1)]
+
+                add_buys = 0
+                add_sells = 0
+                for px in buy_targets:
+                    if self.max_new_per_loop and add_buys >= self.max_new_per_loop:
+                        break
+                    await self._place_order(OrderSide.BUY, px)
+                    add_buys += 1
+                    await asyncio.sleep(self.op_spacing_sec)
+
+                for px in sell_targets:
+                    if self.max_new_per_loop and add_sells >= self.max_new_per_loop:
+                        break
+                    await self._place_order(OrderSide.SELL, px)
+                    add_sells += 1
+                    await asyncio.sleep(self.op_spacing_sec)
+
                 self.initialized = True
+                self._bin_center_units = center_units
                 logger.info("BIN: 初期配置完了 買い{}本 売り{}本", len(self.placed_buy_px_to_id), len(self.placed_sell_px_to_id))
+                return
+
+            # 以降: 方向性インクリメンタル（近い側は触らない）
+            prev_units = self._bin_center_units if self._bin_center_units is not None else center_units
+            delta_units = center_units - prev_units
+
+            # 変化なし → レベル不足のみ外側へ補充
+            if delta_units == 0:
+                try:
+                    while len(self.placed_buy_px_to_id) < self.levels and self.placed_buy_px_to_id:
+                        new_outer_buy = min(self.placed_buy_px_to_id.keys()) - self.step
+                        if new_outer_buy <= 0:
+                            break
+                        await self._place_order(OrderSide.BUY, new_outer_buy)
+                        await asyncio.sleep(self.op_spacing_sec)
+                    while len(self.placed_sell_px_to_id) < self.levels and self.placed_sell_px_to_id:
+                        new_outer_sell = max(self.placed_sell_px_to_id.keys()) + self.step
+                        await self._place_order(OrderSide.SELL, new_outer_sell)
+                        await asyncio.sleep(self.op_spacing_sec)
+                except Exception as e:
+                    logger.debug("BIN: 補充スキップ {}", e)
+                return
+
+            steps = int(abs(delta_units))
+            direction_up = delta_units > 0
+
+            for _ in range(steps):
+                if direction_up:
+                    # 上昇: BUYのみ内側へ1段スライド（遠いBUYを消して近い側へ+Nで追加）
+                    if self.placed_buy_px_to_id:
+                        far_buy_px = min(self.placed_buy_px_to_id.keys())
+                        far_buy_id = self.placed_buy_px_to_id.pop(far_buy_px)
+                        try:
+                            await self.adapter.cancel_order(far_buy_id)
+                        except Exception:
+                            logger.debug("BIN↑: 遠いBUYキャンセル失敗(無視) id={} px={}", far_buy_id, far_buy_px)
+                        await asyncio.sleep(self.op_spacing_sec)
+
+                        near_buy = max(self.placed_buy_px_to_id.keys()) if self.placed_buy_px_to_id else (center - self.step)
+                        new_near_buy = near_buy + self.step
+                        if new_near_buy < (mid_price - 1e-9) and new_near_buy not in self.placed_buy_px_to_id and self._has_min_gap(self.placed_buy_px_to_id, new_near_buy):
+                            await self._place_order(OrderSide.BUY, new_near_buy)
+                            await asyncio.sleep(self.op_spacing_sec)
+
+                    # SELLは近い側を触らず最外だけを+Nで差し直し
+                    if self.placed_sell_px_to_id:
+                        far_sell_px = max(self.placed_sell_px_to_id.keys())
+                        far_sell_id = self.placed_sell_px_to_id.pop(far_sell_px)
+                        try:
+                            await self.adapter.cancel_order(far_sell_id)
+                        except Exception:
+                            logger.debug("BIN↑: 遠いSELLキャンセル失敗(無視) id={} px={}", far_sell_id, far_sell_px)
+                        await asyncio.sleep(self.op_spacing_sec)
+
+                        new_outer_sell = far_sell_px + self.step
+                        if new_outer_sell > (mid_price + 1e-9) and new_outer_sell not in self.placed_sell_px_to_id and self._has_min_gap(self.placed_sell_px_to_id, new_outer_sell):
+                            await self._place_order(OrderSide.SELL, new_outer_sell)
+                            await asyncio.sleep(self.op_spacing_sec)
+                else:
+                    # 下降: SELLのみ内側へ1段スライド
+                    if self.placed_sell_px_to_id:
+                        far_sell_px = max(self.placed_sell_px_to_id.keys())
+                        far_sell_id = self.placed_sell_px_to_id.pop(far_sell_px)
+                        try:
+                            await self.adapter.cancel_order(far_sell_id)
+                        except Exception:
+                            logger.debug("BIN↓: 遠いSELLキャンセル失敗(無視) id={} px={}", far_sell_id, far_sell_px)
+                        await asyncio.sleep(self.op_spacing_sec)
+
+                        near_sell = min(self.placed_sell_px_to_id.keys()) if self.placed_sell_px_to_id else (center + self.step)
+                        new_near_sell = near_sell - self.step
+                        if new_near_sell > (mid_price + 1e-9) and new_near_sell not in self.placed_sell_px_to_id and self._has_min_gap(self.placed_sell_px_to_id, new_near_sell):
+                            await self._place_order(OrderSide.SELL, new_near_sell)
+                            await asyncio.sleep(self.op_spacing_sec)
+
+                    # BUYは近い側を触らず最外だけを-Nで差し直し
+                    if self.placed_buy_px_to_id:
+                        far_buy_px = min(self.placed_buy_px_to_id.keys())
+                        far_buy_id = self.placed_buy_px_to_id.pop(far_buy_px)
+                        try:
+                            await self.adapter.cancel_order(far_buy_id)
+                        except Exception:
+                            logger.debug("BIN↓: 遠いBUYキャンセル失敗(無視) id={} px={}", far_buy_id, far_buy_px)
+                        await asyncio.sleep(self.op_spacing_sec)
+
+                        new_outer_buy = far_buy_px - self.step
+                        if new_outer_buy > 0 and new_outer_buy < (mid_price - 1e-9) and new_outer_buy not in self.placed_buy_px_to_id and self._has_min_gap(self.placed_buy_px_to_id, new_outer_buy):
+                            await self._place_order(OrderSide.BUY, new_outer_buy)
+                            await asyncio.sleep(self.op_spacing_sec)
+
+            self._bin_center_units = center_units
             return
 
         # 初期配置後:
@@ -778,3 +840,4 @@ class GridEngine:
             pass
         except Exception as e:
             logger.error("クローズ済みPnL取得エラー: {}", e)
+# touch test 2025-11-01T23:11:35
